@@ -4,30 +4,40 @@ This is a plugin to manage Bluetooth.
 @module koplugin.Bluetooth
 --]]--
 
+local logger = require("logger")
 local Dispatcher = require("dispatcher")
 local InfoMessage = require("ui/widget/infomessage")
 local UIManager = require("ui/uimanager")
-local WidgetContainer = require("ui/widget/container/widgetcontainer")
+
 local InputContainer = require("ui/widget/container/inputcontainer")
 local Device = require("device")
-local EventListener = require("ui/widget/eventlistener")
-local Event = require("ui/event")  -- Add this line
+local Event = require("ui/event")
 
--- local BTKeyManager = require("BTKeyManager")
+local time = require("ui/time")
+local ffiutil = require("ffi/util")
+local util = require("util")
+
+
+local event_map = {}
+util.tableMerge(event_map, Device.input.event_map)
+util.tableMerge(event_map, dofile("plugins/bluetooth.koplugin/event_map.lua"))
+
 
 local _ = require("gettext")
 
--- local Bluetooth = EventListener:extend{
+
 local Bluetooth = InputContainer:extend{
     name = "Bluetooth",
     is_bluetooth_on = false,  -- Tracks the state of Bluetooth
-    input_device_path = "/dev/input/event3",  -- Device path
+    input_device_path = "/dev/input/event5",  -- Device path
+    
+    double_tap_timer = false,
 }
 
 function Bluetooth:onDispatcherRegisterActions()
     Dispatcher:registerAction("bluetooth_on_action", {category="none", event="BluetoothOn", title=_("Bluetooth On"), general=true})
     Dispatcher:registerAction("bluetooth_off_action", {category="none", event="BluetoothOff", title=_("Bluetooth Off"), general=true})
-    Dispatcher:registerAction("refresh_pairing_action", {category="none", event="RefreshPairing", title=_("Refresh Device Input"), general=true}) -- New action
+    Dispatcher:registerAction("refresh_pairing_action", {category="none", event="RefreshPairing", title=_("Reopen Device Input"), general=true}) -- New action
     Dispatcher:registerAction("connect_to_device_action", {category="none", event="ConnectToDevice", title=_("Connect to Device"), general=true}) -- New action
 end
 
@@ -50,7 +60,6 @@ function Bluetooth:registerKeyEvents()
 	self.key_events.BTLastBookmark = { { "BTLastBookmark" }, event = "BTLastBookmark" }
 	self.key_events.BTToggleNightMode = { { "BTToggleNightMode" }, event = "BTToggleNightMode" }
 	self.key_events.BTToggleStatusBar = { { "BTToggleStatusBar" }, event = "BTToggleStatusBar" }
-	
 end
 
 
@@ -83,7 +92,23 @@ function Bluetooth:onBTBluetoothOff()
 end
 
 function Bluetooth:onBTRight()
-    UIManager:sendEvent(Event:new("GotoViewRel", 1))
+    logger.info("---- BT Click Event Triggered ----")
+    if self.double_tap_timer then
+        self.double_tap_timer = false
+        Device.input:clearTimeout(0, "double_tap")
+        UIManager:sendEvent(Event:new("GotoViewRel", -1))
+	    logger.info("---- Double Tap ----")
+    else
+        self.double_tap_timer = true
+        Device.input.gesture_detector.clock_id = 1
+        Device.input:setTimeout(0, "double_tap", function()
+            if self.double_tap_timer then
+                UIManager:sendEvent(Event:new("GotoViewRel", 1))
+                self.double_tap_timer = false
+                logger.info("---- Single Tap ----")
+            end
+        end, time.now(), 400000)
+    end
 end
 
 function Bluetooth:onBTLeft()
@@ -142,11 +167,12 @@ function Bluetooth:addToMainMenu(menu_items)
             {
                 text = _("Bluetooth on"),
                 callback = function()
-                    if not self:isWifiEnabled() then
-                        self:popup("Please turn on Wi-Fi to continue.")
-                    else
-                        self:onBluetoothOn()
-                    end
+                    -- Kobo Libra 2 does not require Wi-Fi to connect to Bluetooth
+                    -- if not self:isWifiEnabled() then
+                    --     self:popup("Please turn on Wi-Fi to continue.")
+                    -- else
+                    self:onBluetoothOn()
+                    -- end
                 end,
             },
             {
@@ -162,7 +188,7 @@ function Bluetooth:addToMainMenu(menu_items)
                 end,
             },
             {
-                text = _("Refresh Device Input"), -- New menu item
+                text = _("Reopen Device Input"), -- New menu item
                 callback = function()
                     self:onRefreshPairing()
                 end,
@@ -176,7 +202,7 @@ function Bluetooth:getScriptPath(script)
 end
 
 function Bluetooth:executeScript(script)
-    local command = "/bin/sh /mnt/onboard/.koreader/plugins/bluetooth.koplugin/" .. script
+    local command = "/bin/sh /mnt/onboard/.adds/koreader/plugins/bluetooth.koplugin/" .. script
     local handle = io.popen(command)
     local result = handle:read("*a")
     handle:close()
@@ -192,14 +218,14 @@ function Bluetooth:onBluetoothOn()
         self.is_bluetooth_on = false
         return
     end
+    self.is_bluetooth_on = true
+    self:popup(_("Bluetooth turned on."))
 
-    if result:match("complete") then
-        self.is_bluetooth_on = true
-        self:popup(_("Bluetooth turned on."))
-    else
-        self:popup(_("Result: ") .. result)
-        self.is_bluetooth_on = false
-    end
+    ffiutil.sleep(1)
+    self:onConnectToDevice()
+
+    ffiutil.sleep(1)
+    self:onRefreshPairing()
 end
 
 function Bluetooth:onBluetoothOff()
@@ -211,25 +237,8 @@ function Bluetooth:onBluetoothOff()
 end
 
 function Bluetooth:onRefreshPairing()
-    if not self.is_bluetooth_on then
-        self:popup(_("Bluetooth is off. Please turn it on before refreshing pairing."))
-        return
-    end
-
-    local status, err = pcall(function()
-        -- Ensure the device path is valid
-        if not self.input_device_path or self.input_device_path == "" then
-            error("Invalid device path")
-        end
-
-        Device.input.close(self.input_device_path) -- Close the input using the high-level parameter
-        Device.input.open(self.input_device_path)  -- Reopen the input using the high-level parameter
-        self:popup(_("Bluetooth device at ") .. self.input_device_path .. " is now open.")
-    end)
-
-    if not status then
-        self:popup(_("Error: ") .. err)
-    end
+    Device.input.open(self.input_device_path)  -- Reopen the input using the high-level parameter
+    self:popup(_("Bluetooth device at ") .. self.input_device_path .. " is now open.")
 end
 
 function Bluetooth:onConnectToDevice()
@@ -263,15 +272,5 @@ function Bluetooth:popup(text)
     }
     UIManager:show(popup)
 end
-
-function Bluetooth:isWifiEnabled()
-    local handle = io.popen("iwconfig")
-    local result = handle:read("*a")
-    handle:close()
-
-    -- Check if Wi-Fi is enabled by looking for 'ESSID'
-    return result:match("ESSID") ~= nil
-end
-
 
 return Bluetooth
